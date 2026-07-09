@@ -75,13 +75,7 @@ cd RAG_prototype
 python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
 
-pip install \
-  langchain==0.3.* langchain-community==0.3.* langchain-huggingface==0.1.* \
-  langchain-qdrant==0.2.* qdrant-client==1.12.* fastembed langchain-openai \
-  sentence-transformers==3.3.* transformers==4.47.* torch==2.5.* \
-  pypdf==5.* pymupdf==1.28.* pytesseract pillow python-docx \
-  python-dotenv==1.0.* openai==1.57.* ragas==0.2.* \
-  fastapi uvicorn
+pip install -r requirements.txt
 ```
 
 ### Запуск Qdrant
