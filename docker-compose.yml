@@ -1,0 +1,30 @@
+# Схема для macOS (см. Фазу 6 PIPELINE.md): в Docker — только Open WebUI;
+# Qdrant пока запущен отдельным контейнером (qdrant_local, порт 6333),
+# Ollama (brew services start ollama, порт 11434, Metal-акселерация) и
+# rag-app (src/api.py, порт 8000) работают нативно на хосте
+# и доступны из контейнера через host.docker.internal.
+#
+# Запуск rag-app перед стартом: .venv/bin/uvicorn src.api:app --host 0.0.0.0 --port 8000
+
+services:
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open_webui
+    ports:
+      - "3000:8080"
+    volumes:
+      - open_webui_data:/app/backend/data
+    environment:
+      # подключение к OpenAI-совместимому RAG-серверу (src/api.py) на хосте
+      - OPENAI_API_BASE_URL=http://host.docker.internal:8000/v1
+      - OPENAI_API_KEY=rag-app
+      # прямое Ollama-подключение не используется (LLM скрыт за RAG-сервером)
+      - ENABLE_OLLAMA_API=false
+      # локальная разработка: без экрана логина (не использовать в production)
+      - WEBUI_AUTH=False
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-changeme}
+    restart: unless-stopped
+
+volumes:
+  open_webui_data:
