@@ -1,9 +1,3 @@
-# Схема для macOS (см. Фазу 6 PIPELINE.md): в Docker — только Open WebUI;
-# Qdrant пока запущен отдельным контейнером (qdrant_local, порт 6333),
-# Ollama (brew services start ollama, порт 11434, Metal-акселерация) и
-# rag-app (src/api.py, порт 8000) работают нативно на хосте
-# и доступны из контейнера через host.docker.internal.
-#
 # Запуск rag-app перед стартом: .venv/bin/uvicorn src.api:app --host 0.0.0.0 --port 8000
 
 services:
