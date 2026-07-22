@@ -13,6 +13,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from src.config import TOP_K
 from src.generation import (
     NO_CONTEXT_ANSWER,
     _hold_back_open_tags,
@@ -24,7 +25,6 @@ from src.generation import (
 from src.retrieval import get_retriever
 
 MODEL_ID = "rag-normative-docs"
-TOP_K = 10
 
 # тяжёлые компоненты (embedding-модель, подключение к БД) инициализируются
 # один раз на старте сервера, а не на каждый запрос

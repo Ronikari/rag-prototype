@@ -1,7 +1,5 @@
-import os
 import re
 from pathlib import Path
-from dotenv import load_dotenv
 from langchain_ollama import ChatOllama
 from langchain.prompts import ChatPromptTemplate
 from langchain.schema.runnable import RunnableLambda, RunnablePassthrough
@@ -9,20 +7,8 @@ from langchain.schema.output_parser import StrOutputParser
 from langchain.schema import Document
 from typing import List
 
+from src.config import LLM_MODEL, OLLAMA_BASE_URL, OLLAMA_NUM_CTX, TOP_K
 from src.retrieval import get_retriever
-
-load_dotenv()
-
-# Нативный API Ollama (сервис на хосте, порт 11434, без суффикса /v1);
-# в docker-compose для контейнеров — http://host.docker.internal:11434
-OLLAMA_BASE_URL = os.getenv(
-    "OLLAMA_BASE_URL", "http://localhost:11434"
-).removesuffix("/v1")
-LLM_MODEL = os.getenv("LLM_MODEL", "qwen3:4b")
-# Контекстное окно: дефолтные 4096 Ollama не вмещают RAG-промпт (~2900 токенов)
-# + thinking + ответ — сервер делал context shift посреди генерации (медленно,
-# обрезался system prompt). Через /v1 num_ctx передать нельзя, поэтому ChatOllama.
-OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", 16384))
 
 NO_CONTEXT_ANSWER = (
     "В доступной нормативной документации не найдено информации по данному вопросу."
@@ -124,9 +110,6 @@ def format_docs(docs: List[Document]) -> str:
         section = doc.metadata.get("section", "")
         if section:
             source_info += f", {section}"
-        page = doc.metadata.get("page", "")
-        if page:
-            source_info += f", стр. {page}"
         formatted.append(f'[Документ: "{source_info}"]\n{doc.page_content}')
     return "\n\n---\n\n".join(formatted)
 
@@ -148,7 +131,7 @@ def build_generation_chain(llm: ChatOllama = None):
     return RAG_PROMPT | llm | StrOutputParser() | RunnableLambda(clean_llm_output)
 
 
-def build_rag_chain(top_k: int = 10):
+def build_rag_chain(top_k: int = TOP_K):
     """Сборка RAG цепочки: retrieval -> генерация -> очистка -> добавление источников.
 
     Список источников формируется программно из метаданных найденных чанков Qdrant,
@@ -174,7 +157,7 @@ def build_rag_chain(top_k: int = 10):
     return chain
 
 
-def stream_answer(question: str, top_k: int = 10) -> None:
+def stream_answer(question: str, top_k: int = TOP_K) -> None:
     """Стриминг ответа из Ollama; источники печатаются после ответа.
 
     Служебные теги фильтруются на лету: наружу выводится только очищенная часть

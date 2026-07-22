@@ -1,12 +1,9 @@
-import os
+import logging
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
-from langchain_community.document_loaders import (
-    TextLoader,
-    DirectoryLoader,
-)
+from langchain_community.document_loaders import TextLoader
 from langchain.schema import Document
-from langchain.text_splitter import RecursiveCharacterTextSplitter
 from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 import fitz  # PyMuPDF
@@ -18,34 +15,19 @@ from docx.oxml.text.paragraph import CT_P
 from docx.table import Table as DocxTable
 from docx.text.paragraph import Paragraph as DocxParagraph
 
+from src.manifest import MANIFEST_PATH, load_manifest, now_iso, save_manifest, sha256_file, sha256_text
+
+logger = logging.getLogger(__name__)
+
 # среднее число символов на страницу, ниже которого PDF считается сканом без текстового слоя
 OCR_MIN_CHARS_PER_PAGE = 20
-
-# параметры чанкинга
-CHUNK_SIZE = 800
-CHUNK_OVERLAP = 150
-CHUNK_SEPARATORS = [
-    "\n\n",          # параграф
-    "\n",            # перенос строки
-    ". ",            # конец предложения
-    " ",             # слово
-    "",              # символ
-]
-
-# максимальная длина строки-заголовка, дублируемой в чанки-продолжения
-CONTEXT_HEADER_MAX_LEN = 200
-
-# начало статьи закона
-ARTICLE_RE = re.compile(r"^Статья\s+(\d+(?:\.\d+)*)\.?\s")
-# начало пункта правил/приказа: "10. ...", "9(1). ...", "18(2). ...", "10.1. ..."
-POINT_RE = re.compile(r"^(\d+(?:\.\d+)*(?:\(\d+\))?)\.\s")
-
-# строка markdown-таблицы (в этот формат сериализуются таблицы PDF/DOCX)
-TABLE_LINE_RE = re.compile(r"^\s*\|")
 
 # минимальная доля площади текстового блока внутри таблицы,
 # при которой блок считается частью таблицы и исключается из обычного текста
 TABLE_BLOCK_OVERLAP = 0.5
+
+# типы файлов, обрабатываемые ingestion
+RAW_FILE_PATTERNS = ("*.pdf", "*.docx", "*.txt")
 
 
 def _table_rows_to_markdown(rows: List[List[Optional[str]]]) -> str:
@@ -103,24 +85,16 @@ def ocr_pdf(path: str, dpi: int = 300, lang: str = "rus") -> List[Document]:
     return documents
 
 
-def _ocr_scanned_pdfs(
-    documents: List[Document], ocr_lang: str = "rus", ocr_dpi: int = 300
-) -> List[Document]:
-    """Заменяет документы PDF без текстового слоя (сканы) на результат OCR."""
+def _maybe_ocr_pdf(source: str, pages: List[Document], ocr_lang: str = "rus", ocr_dpi: int = 300) -> List[Document]:
+    """Заменяет страницы PDF без текстового слоя (скан) на результат OCR."""
 
-    by_source: Dict[str, List[Document]] = {}
-    for doc in documents:
-        by_source.setdefault(doc.metadata.get("source", ""), []).append(doc)
-
-    result = []
-    for source, docs in by_source.items():
-        avg_chars = sum(len(d.page_content.strip()) for d in docs) / len(docs)
-        if source.endswith(".pdf") and avg_chars < OCR_MIN_CHARS_PER_PAGE:
-            print(f"OCR: {source} (текстовый слой отсутствует, {len(docs)} стр.)")
-            result.extend(ocr_pdf(source, dpi=ocr_dpi, lang=ocr_lang))
-        else:
-            result.extend(docs)
-    return result
+    if not pages:
+        return pages
+    avg_chars = sum(len(d.page_content.strip()) for d in pages) / len(pages)
+    if avg_chars < OCR_MIN_CHARS_PER_PAGE:
+        logger.info("OCR: %s (текстовый слой отсутствует, %d стр.)", source, len(pages))
+        return ocr_pdf(source, dpi=ocr_dpi, lang=ocr_lang)
+    return pages
 
 
 def _pdf_page_content(page: "fitz.Page") -> str:
@@ -206,33 +180,27 @@ def load_docx(path: str) -> List[Document]:
     return [Document(page_content="\n\n".join(blocks), metadata={"source": path})]
 
 
-def load_documents(data_dir: str = "data/raw") -> List[Document]:
-    """Загружает PDF, TXT и DOCX документы из директории.
+def discover_raw_files(data_dir: str = "data/raw") -> List[Path]:
+    """Список исходных файлов (PDF/DOCX/TXT) в каталоге, отсортированный для детерминированности."""
 
-    PDF и DOCX загружаются с сохранением таблиц (markdown);
-    PDF без текстового слоя (сканы) автоматически распознаются через OCR (Tesseract).
-    """
+    base = Path(data_dir)
+    files: List[Path] = []
+    for pattern in RAW_FILE_PATTERNS:
+        files.extend(base.rglob(pattern))
+    return sorted(set(files))
 
-    txt_loader = DirectoryLoader(
-        data_dir,
-        glob="**/*.txt",
-        loader_cls=lambda path: TextLoader(path, encoding="utf-8"),
-        show_progress=True,
-    )
 
-    pdf_documents = []
-    for path in sorted(Path(data_dir).rglob("*.pdf")):
-        pdf_documents.extend(load_pdf(str(path)))
-    pdf_documents = _ocr_scanned_pdfs(pdf_documents)
+def load_single_document(path: Path) -> List[Document]:
+    """Загружает один исходный файл (постранично для PDF) без очистки/OCR-решения."""
 
-    documents = []
-    documents.extend(pdf_documents)
-    documents.extend(txt_loader.load())
-    for path in sorted(Path(data_dir).rglob("*.docx")):
-        documents.extend(load_docx(str(path)))
-
-    print(f"Загружено документов: {len(documents)}")
-    return documents
+    suffix = path.suffix.lower()
+    if suffix == ".pdf":
+        return load_pdf(str(path))
+    if suffix == ".docx" or suffix == ".doc":
+        return load_docx(str(path))
+    if suffix == ".txt":
+        return TextLoader(str(path), encoding="utf-8").load()
+    raise ValueError(f"неподдерживаемый тип файла: {suffix}")
 
 
 def clean_text(text: str) -> str:
@@ -251,6 +219,7 @@ def clean_text(text: str) -> str:
     text = re.sub(r'КонсультантПлюс\s*\n?\s*надежная правовая поддержка\s*\n?', '', text)
     text = re.sub(r'Напечатано с сайта[^\n]*\n?', '', text)
     text = re.sub(r'Страница\s+\d+\s+из\s+\d+\s*\n?', '', text)
+    # сюда добавить оставшиемся символы, подлежащие удалению
 
     # убираем дублирующиеся пробелы и переносы
     text = re.sub(r'\n{3,}', '\n\n', text)
@@ -307,6 +276,24 @@ def merge_documents_by_source(documents: List[Document]) -> List[Document]:
     return merged
 
 
+def process_single_raw_file(path: Path) -> Document:
+    """Полный цикл обработки одного исходного файла: загрузка (+ OCR для сканов PDF) -> очистка -> слияние в один документ.
+
+    Бросает исключение при ошибке загрузки/парсинга или если после очистки
+    не осталось текста — вызывающая сторона (run_preprocessing_pipeline)
+    перехватывает её на уровне файла, чтобы один битый документ не обрывал
+    обработку остальных.
+    """
+
+    pages = load_single_document(path)
+    if path.suffix.lower() == ".pdf":
+        pages = _maybe_ocr_pdf(str(path), pages)
+    pages = preprocess_documents(pages)
+    if not pages:
+        raise ValueError("после очистки не осталось текста (пустой документ или OCR не дал результата)")
+    return merge_documents_by_source(pages)[0]
+
+
 def save_processed_documents(
     documents: List[Document], output_dir: str = "data/processed"
 ) -> List[Path]:
@@ -323,201 +310,88 @@ def save_processed_documents(
         out_path.write_text(doc.page_content, encoding="utf-8")
         saved_paths.append(out_path)
 
-    print(f"Сохранено обработанных документов: {len(saved_paths)} -> {out_dir}/")
     return saved_paths
 
 
+@dataclass
+class IngestResult:
+    """Итог стадии ingest: какие исходники обработаны/пропущены/удалены/провалились."""
+
+    processed: List[str] = field(default_factory=list)
+    skipped: List[str] = field(default_factory=list)
+    failed: List[Tuple[str, str]] = field(default_factory=list)
+    deleted: List[str] = field(default_factory=list)
+
+
 def run_preprocessing_pipeline(
-    data_dir: str = "data/raw", output_dir: str = "data/processed"
-) -> List[Document]:
-    """Полный цикл фазы 1: загрузка -> очистка -> объединение по источнику -> сохранение."""
-    documents = load_documents(data_dir)
-    documents = preprocess_documents(documents)
-    documents = merge_documents_by_source(documents)
-    save_processed_documents(documents, output_dir)
-    return documents
+    data_dir: str = "data/raw",
+    output_dir: str = "data/processed",
+    manifest_path: Path = MANIFEST_PATH,
+    force: bool = False,
+) -> IngestResult:
+    """Фаза 1, инкрементально: обрабатывает только новые/изменившиеся исходники (по манифесту),
+    помечает удалённые исходники (файл больше не существует в data/raw) для последующей
+    зачистки в Qdrant на стадии индексации, и не даёт ошибке на одном файле оборвать весь прогон.
+    """
 
+    manifest = load_manifest(manifest_path)
+    raw_files = discover_raw_files(data_dir)
+    raw_sources = {str(p) for p in raw_files}
+    result = IngestResult()
 
-def load_processed_documents(processed_dir: str = "data/processed") -> List[Document]:
-    """Загружает предобработанные .txt документы из data/processed (по одному на источник)."""
+    # удалённые исходники: были в манифесте, файла больше нет на диске
+    for source, entry in manifest.items():
+        if source in raw_sources or entry.get("raw_deleted"):
+            continue
+        processed_path = entry.get("processed_path")
+        if processed_path and Path(processed_path).exists():
+            Path(processed_path).unlink()
+        entry["raw_deleted"] = True
+        result.deleted.append(source)
+        logger.info("Удалён исходник: %s", source)
 
-    loader = DirectoryLoader(
-        processed_dir,
-        glob="**/*.txt",
-        loader_cls=lambda path: TextLoader(path, encoding="utf-8"),
-        show_progress=True,
+    for path in raw_files:
+        source = str(path)
+        raw_hash = sha256_file(path)
+        entry = manifest.get(source, {})
+        processed_path = entry.get("processed_path")
+        unchanged = (
+            not force
+            and entry.get("raw_sha256") == raw_hash
+            and processed_path
+            and Path(processed_path).exists()
+        )
+        if unchanged:
+            result.skipped.append(source)
+            continue
+
+        try:
+            doc = process_single_raw_file(path)
+            out_path = save_processed_documents([doc], output_dir)[0]
+            manifest[source] = {
+                "raw_sha256": raw_hash,
+                "processed_path": str(out_path),
+                "processed_sha256": sha256_text(doc.page_content),
+                "ingested_at": now_iso(),
+                # indexed_sha256/point_ids сохраняются от предыдущего запуска (если были) —
+                # index-стадия сама увидит расхождение processed_sha256 и переиндексирует
+                "indexed_sha256": entry.get("indexed_sha256"),
+                "point_ids": entry.get("point_ids", []),
+            }
+            result.processed.append(source)
+            logger.info("Обработан: %s -> %s", source, out_path)
+        except Exception as exc:
+            logger.error("Ошибка обработки %s: %s", source, exc)
+            result.failed.append((source, str(exc)))
+
+    save_manifest(manifest, manifest_path)
+    logger.info(
+        "Ingest: обработано %d, без изменений %d, ошибок %d, удалено %d",
+        len(result.processed), len(result.skipped), len(result.failed), len(result.deleted),
     )
-    documents = loader.load()
-    print(f"Загружено обработанных документов: {len(documents)}")
-    return documents
-
-
-def split_into_structural_units(text: str) -> List[Tuple[str, Optional[str], str]]:
-    """Разбивает текст нормативного документа на структурные единицы (статьи и пункты).
-
-    Возвращает список кортежей (section, article_heading, unit_text):
-    - section — метка для цитирования: "статья 26", "пункт 10", "статья 26, пункт 2"
-      или "" для текста вне структуры (преамбула, приложения без нумерации);
-    - article_heading — строка-заголовок текущей статьи (для дублирования в чанки);
-    - unit_text — текст единицы, начинающийся со строки статьи/пункта.
-    """
-    units: List[Tuple[str, Optional[str], str]] = []
-    current_lines: List[str] = []
-    current_article: Optional[str] = None       # номер статьи
-    article_heading: Optional[str] = None       # полная строка "Статья N. Название"
-    current_point: Optional[str] = None         # номер пункта
-
-    def make_label() -> str:
-        parts = []
-        if current_article:
-            parts.append(f"статья {current_article}")
-        if current_point:
-            parts.append(f"пункт {current_point}")
-        return ", ".join(parts)
-
-    def flush() -> None:
-        unit_text = "\n".join(current_lines).strip()
-        if unit_text:
-            units.append((make_label(), article_heading, unit_text))
-        current_lines.clear()
-
-    for line in text.split("\n"):
-        stripped = line.lstrip()
-        article_match = ARTICLE_RE.match(stripped)
-        point_match = None if article_match else POINT_RE.match(stripped)
-        if article_match or point_match:
-            flush()
-            if article_match:
-                current_article = article_match.group(1)
-                article_heading = stripped[:CONTEXT_HEADER_MAX_LEN]
-                current_point = None
-            else:
-                current_point = point_match.group(1)
-        current_lines.append(line)
-    flush()
-
-    return units
-
-
-def _unit_header(unit_text: str) -> str:
-    """Первая строка структурной единицы"""
-    first_line = unit_text.split("\n", 1)[0].strip()
-    return first_line[:CONTEXT_HEADER_MAX_LEN]
-
-
-def _split_text_and_tables(text: str) -> List[Tuple[str, bool]]:
-    """Разбивает текст на чередующиеся блоки (block_text, is_table).
-
-    Таблицей считается непрерывная последовательность markdown-строк "| ... |".
-    """
-
-    blocks: List[Tuple[str, bool]] = []
-    current: List[str] = []
-    current_is_table = False
-    for line in text.split("\n"):
-        is_table = bool(TABLE_LINE_RE.match(line))
-        if current and is_table != current_is_table:
-            blocks.append(("\n".join(current), current_is_table))
-            current = []
-        current_is_table = is_table
-        current.append(line)
-    if current:
-        blocks.append(("\n".join(current), current_is_table))
-    return blocks
-
-
-def _split_table(table_text: str) -> List[str]:
-    """Режет длинную markdown-таблицу на части по границам строк.
-
-    Шапка (первая строка + разделитель) дублируется в каждую часть — иначе
-    продолжение таблицы теряет названия колонок и значения ячеек становятся
-    бессмысленными и для эмбеддинга, и для LLM.
-    """
-
-    if len(table_text) <= CHUNK_SIZE:
-        return [table_text]
-
-    lines = table_text.split("\n")
-    header, body = lines[:2], lines[2:]
-    parts: List[str] = []
-    current = list(header)
-    size = sum(len(line) + 1 for line in current)
-    for line in body:
-        if size + len(line) + 1 > CHUNK_SIZE and len(current) > len(header):
-            parts.append("\n".join(current))
-            current = list(header)
-            size = sum(len(l) + 1 for l in current)
-        current.append(line)
-        size += len(line) + 1
-    if len(current) > len(header):
-        parts.append("\n".join(current))
-    return parts
-
-
-def split_documents(documents: List[Document]) -> List[Document]:
-    """Разбивка документов на чанки по структуре нормативных текстов.
-
-    Текст сначала режется по границам статей и пунктов, затем длинные единицы
-    дробятся сплиттером. Номер статьи/пункта записывается в метаданные чанка
-    (ключ "section"), а в чанки-продолжения дублируется строка-заголовок единицы —
-    иначе хвост длинного пункта теряет свой номер и вводную фразу, из-за чего
-    не находится поиском и не может быть корректно процитирован моделью.
-
-    Markdown-таблицы дробятся отдельно от текста (_split_table): по границам
-    строк таблицы и с дублированием шапки; чанк с таблицей получает метку
-    content_type="table" в метаданных.
-    """
-
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=CHUNK_SIZE,
-        chunk_overlap=CHUNK_OVERLAP,
-        separators=CHUNK_SEPARATORS,
-        length_function=len,
-        is_separator_regex=False,
-    )
-
-    chunks: List[Document] = []
-    for doc in documents:
-        for section, article_heading, unit_text in split_into_structural_units(
-            doc.page_content
-        ):
-            parts: List[Tuple[str, bool]] = []
-            for block, is_table in _split_text_and_tables(unit_text):
-                if is_table:
-                    parts.extend((p, True) for p in _split_table(block))
-                elif block.strip():
-                    parts.extend((p, False) for p in splitter.split_text(block))
-            unit_header = _unit_header(unit_text)
-            for j, (part, is_table) in enumerate(parts):
-                header_lines = []
-                # статья указана в метке, но её заголовок в тексте пункта не виден
-                if article_heading and "пункт" in section:
-                    header_lines.append(article_heading)
-                # чанк-продолжение потерял первую строку своей единицы
-                if j > 0 and section:
-                    header_lines.append(unit_header)
-                content = "\n".join(header_lines + [part]) if header_lines else part
-                metadata = {**doc.metadata, "section": section}
-                if is_table:
-                    metadata["content_type"] = "table"
-                chunks.append(Document(page_content=content, metadata=metadata))
-
-    # добавляем порядковый номер чанка в метаданные для отладки
-    for i, chunk in enumerate(chunks):
-        chunk.metadata["chunk_id"] = i
-        chunk.metadata["chunk_size"] = len(chunk.page_content)
-
-    print(f"Создано чанков: {len(chunks)}")
-    print(f"Средний размер чанка: {sum(len(c.page_content) for c in chunks) / len(chunks):.0f} символов")
-    return chunks
-
-
-def run_chunking_pipeline(processed_dir: str = "data/processed") -> List[Document]:
-    """Загрузка предобработанных документов из data/processed"""
-    documents = load_processed_documents(processed_dir)
-    return split_documents(documents)
+    return result
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     run_preprocessing_pipeline()
-    run_chunking_pipeline()

@@ -8,7 +8,6 @@ fastembed==0.8.0
 sentence-transformers==3.3.1
 transformers==4.47.1
 torch==2.5.1
-pypdf==5.9.0
 pymupdf==1.28.0
 pytesseract==0.3.13
 pillow==12.3.0
@@ -19,3 +18,4 @@ datasets==5.0.0
 pydantic==2.13.4
 fastapi==0.139.0
 uvicorn==0.50.2
+typer==0.26.8

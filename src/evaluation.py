@@ -9,30 +9,28 @@ from ragas.llms import LangchainLLMWrapper
 from ragas.embeddings import LangchainEmbeddingsWrapper
 from ragas.run_config import RunConfig
 from datasets import Dataset
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 from src.generation import build_rag_chain, get_llm
 from src.retrieval import search_documents
-from src.indexing import get_embeddings
+from src.retrieval_eval import load_golden_set
+from src.vectorstore import get_embeddings
 
 
-EVAL_DATASET = [
-    {
-        "question": "Носит ли технологическое присоединение к электрическим сетям однократный характер?",
-        "ground_truth": "Да, технологическое присоединение энергопринимающих устройств потребителей электрической энергии к объектам электросетевого хозяйства осуществляется в порядке, установленном Правительством Российской Федерации, и носит однократный характер.",
-    },
-    {
-        "question": "На какой срок допускается продление плановой выездной проверки в рамках федерального государственного энергетического надзора?",
-        "ground_truth": "Продление срока проведения выездной плановой проверки допускается в исключительных случаях (сложные и/или длительные исследования, испытания, экспертизы, расследования), но не более чем на пятнадцать рабочих дней.",
-    },
-]
+def run_evaluation(eval_data: List[Dict] = None, limit: Optional[int] = None) -> Dict:
+    """Запуск оценки RAG системы через RAGAS.
 
-
-def run_evaluation(eval_data: List[Dict] = None) -> Dict:
-    """Запуск оценки RAG системы через RAGAS."""
+    По умолчанию вопросы и эталонные ответы берутся из golden set
+    (data/golden_set.json) — того же, по которому считаются метрики поиска
+    в src/retrieval_eval.py. `limit` ограничивает число вопросов: RAGAS
+    прогоняет каждый вопрос через генерацию и LLM-судью, на локальной модели
+    полный набор занимает десятки минут.
+    """
 
     if eval_data is None:
-        eval_data = EVAL_DATASET
+        eval_data = load_golden_set()
+    if limit:
+        eval_data = eval_data[:limit]
 
     # собираем данные для оценки
     questions = []
